@@ -215,7 +215,7 @@ def _print_banner(provider, perms):
     stats_icon = '✅' if perms['stats'] else '❌'
 
     print("")
-    print("🪣 BucketBoss v0.1.0")
+    print("🪣 BucketBoss v0.1.1")
     print("   Target:    s3://%s/" % bucket_name)
     print("   Transport: %s" % transport)
     print("   Access:    %s List  %s Read  %s Stats" % (list_icon, read_icon, stats_icon))

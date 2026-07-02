@@ -4,3 +4,7 @@ Todo.md
 __pycache__/
 **/__pycache__/
 bb-report-*
+docs
+uv.lock
+.gitignore
+.omo

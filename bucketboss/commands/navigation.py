@@ -32,15 +32,19 @@ def do_ls(app, *args):
     # If a file (not ending with slash) is specified, check and show file info
     if path and not path.endswith('/'):
         file_key = app.provider.resolve_path(app.current_prefix, path, is_directory=False)
-        if '/' in file_key:
-            parent_prefix = file_key.rsplit('/', 1)[0] + '/'
-        else:
-            parent_prefix = ''
-        _, files, _ = app.list_objects(parent_prefix)
-        for f in files:
-            if f['name'] == os.path.basename(file_key):
-                print(format_file_entry(f, detailed))
-                return
+        # ponytail: single HEAD instead of listing the whole parent prefix + linear scan.
+        try:
+            meta = app.provider.get_object_metadata(file_key)
+            f = {
+                'name': os.path.basename(file_key),
+                'size': meta['size'],
+                'last_modified': meta['last_modified'],
+                'extension': os.path.splitext(file_key)[1].lower(),
+            }
+            print(format_file_entry(f, detailed))
+            return
+        except Exception:
+            pass
 
     prefix = app.provider.resolve_path(app.current_prefix, path, is_directory=True)
 
@@ -72,7 +76,7 @@ def do_ls(app, *args):
             print('\n'.join(lines))
 
             if next_token:
-                print(f"--- More ({len(all_entries)} items displayed) --- Press 'q' to quit, any other key for next page...")
+                print(f"--- More ({len(all_entries)} items displayed) --- Press Enter for next page, 'q'+Enter to quit...")
                 choice = app._get_single_char_input("")
                 if choice == 'q':
                     break

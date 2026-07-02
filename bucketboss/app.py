@@ -1,15 +1,13 @@
-import io
 import json
 import os
 import shlex
 import sys
 import time
-import tty
-import termios
 from datetime import datetime
 from typing import Optional
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import FuzzyCompleter
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -40,7 +38,7 @@ class BucketBossApp:
         )
         self.session = PromptSession(
             history=self.history,
-            completer=BucketBossCompleter(self),
+            completer=FuzzyCompleter(BucketBossCompleter(self)),
             complete_style=CompleteStyle.COLUMN,
         )
         # Commands map to functions that take (app, *args)
@@ -128,20 +126,18 @@ class BucketBossApp:
             return True
 
     def _get_single_char_input(self, prompt_message: str) -> str:
-        """Gets a single character input from the terminal without requiring Enter."""
-        sys.stdout.write(prompt_message)
-        sys.stdout.flush()
+        """Read a single keypress for pagination prompts.
+
+        ponytail: input() requires Enter but is safe with prompt_toolkit.
+        The previous termios/raw-mode approach (tty.setraw + sys.stdin.read(1))
+        conflicted with prompt_toolkit's vt100 reader: sys.stdin.read(1) is
+        buffered and swallowed typeahead bytes that prompt_toolkit's os.read-based
+        reader couldn't see, leaving the prompt unresponsive after pagination.
+        """
         try:
-            fd = sys.stdin.fileno()
-            old_settings = termios.tcgetattr(fd)
-            try:
-                tty.setraw(fd)
-                char = sys.stdin.read(1)
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-            return char.lower()
-        except (termios.error, io.UnsupportedOperation, AttributeError):
-            # Not a TTY (piped input) — default to 'q' to skip/quit
+            line = input(prompt_message)
+            return line.strip().lower()[:1] if line.strip() else ' '
+        except (EOFError, KeyboardInterrupt):
             return 'q'
 
     def _get_cache_file_path(self):

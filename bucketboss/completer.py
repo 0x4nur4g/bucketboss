@@ -1,5 +1,7 @@
 import os
 import shlex
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from prompt_toolkit.completion import Completer, Completion
 
@@ -14,9 +16,27 @@ class BucketBossCompleter(Completer):
         self.app = bucket_boss_app
 
     def _get_remote_suggestions(self, prefix_to_list, include_files=False):
-        """Helper to get remote directory and file suggestions for a given prefix."""
+        """Helper to get remote directory and file suggestions for a given prefix.
+
+        ponytail: cache fast-path + 3s timeout. boto3 defaults to 60s read timeout
+        × 5 retries = ~5 minutes on a stalled endpoint; that freezes prompt_toolkit
+        (which can't process backspace/tab/anything while the completer is blocked).
+        Cache hits skip the S3 call entirely; misses cap at 3s so the prompt stays
+        responsive even if the endpoint hangs.
+        """
         try:
-            dirs, files, _ = self.app.list_objects(prefix_to_list)
+            # Cache stores (dirs, files, timestamp) for prefixes listed with
+            # limit=None (populated by the background crawl and by cd/other commands).
+            # 21600 = 6h CACHE_TTL_SECONDS (inlined to avoid a circular import).
+            entry = self.app.cache.get(prefix_to_list)
+            if entry and time.time() - entry[2] < 21600:
+                dirs, files = entry[0], entry[1]
+            else:
+                # ponytail: bound to one S3 page — Tab completion never needs thousands.
+                # If prefix has more, user types more chars to narrow.
+                with ThreadPoolExecutor(max_workers=1) as ex:
+                    future = ex.submit(self.app.list_objects, prefix_to_list, 'name', 500)
+                    dirs, files, _ = future.result(timeout=3.0)
             suggestions = [d + '/' for d in dirs]
             if include_files:
                 suggestions += [f['name'] for f in files]
@@ -38,14 +58,13 @@ class BucketBossCompleter(Completer):
 
             completions = []
             for name in os.listdir(dir_path):
-                if name.startswith(partial):
-                    full_item_path = os.path.join(dir_path, name)
-                    completion_text = os.path.join(os.path.dirname(text), name)
+                full_item_path = os.path.join(dir_path, name)
+                completion_text = os.path.join(os.path.dirname(text), name)
 
-                    if os.path.isdir(full_item_path):
-                        completions.append(completion_text + '/')
-                    else:
-                        completions.append(completion_text)
+                if os.path.isdir(full_item_path):
+                    completions.append(completion_text + '/')
+                else:
+                    completions.append(completion_text)
             return completions
         except Exception:
             return []
@@ -67,8 +86,7 @@ class BucketBossCompleter(Completer):
             # --- Case 1: Completing the command name ---
             if num_parts == 0 or (num_parts == 1 and not completing_new_word):
                 for cmd in sorted(self.app.commands.keys()):
-                    if cmd.startswith(word):
-                        yield Completion(cmd, start_position=-len(word))
+                    yield Completion(cmd, start_position=-len(word))
                 return
 
             # --- Case 2: Completing arguments ---
@@ -102,9 +120,8 @@ class BucketBossCompleter(Completer):
                     suggestions = self._get_remote_suggestions(resolved_prefix, include_files=True)
 
                     for s in suggestions:
-                        if s.startswith(partial):
-                            full_suggestion = dir_part + s
-                            yield Completion(full_suggestion, start_position=start_pos)
+                        full_suggestion = dir_part + s
+                        yield Completion(full_suggestion, start_position=start_pos)
                 return
 
             # --- Subcase: Commands needing remote path completion ---
@@ -127,9 +144,8 @@ class BucketBossCompleter(Completer):
                     suggestions = self._get_remote_suggestions(resolved_prefix, include_files=include_files)
 
                     for s in suggestions:
-                        if s.startswith(partial):
-                            full_suggestion = dir_part + s
-                            yield Completion(full_suggestion, start_position=start_pos)
+                        full_suggestion = dir_part + s
+                        yield Completion(full_suggestion, start_position=start_pos)
                 return
 
         except Exception:
