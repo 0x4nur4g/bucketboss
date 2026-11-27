@@ -9,16 +9,18 @@ from typing import Optional
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import FuzzyCompleter
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.patch_stdout import patch_stdout
 
 from .completer import BucketBossCompleter
+from .parallel import safe_filename_component
 from .providers.base import CloudProvider
 from .commands.navigation import do_ls, do_cd, do_tree
 from .commands.read import do_cat, do_peek, do_open
 from .commands.transfer import do_get, do_put, do_mirror, do_diff
 from .commands.search import do_find
-from .commands.info import do_stats, do_crawl_status, do_audit, do_pwd, do_info, do_head, do_du
+from .commands.info import do_stats, do_crawl_status, do_pwd, do_info, do_head, do_du
 from .commands.recon import do_enum, do_enum_report, do_th, do_scope
 from .commands.findings import do_tag, do_findings, do_export
 from .commands.shell import do_exit, do_clear, do_help
@@ -28,19 +30,22 @@ CACHE_TTL_SECONDS = 6 * 3600
 
 
 class BucketBossApp:
-    def __init__(self, provider: CloudProvider):
+    def __init__(self, provider: CloudProvider, interactive: bool = True):
         self.provider = provider
         self.current_prefix = ''
         self.cache = {}  # {prefix: (directories, files, timestamp)}
         self._load_cache()
-        self.history = FileHistory(
-            os.path.join(os.path.expanduser("~"), ".bucketboss_history")
-        )
-        self.session = PromptSession(
-            history=self.history,
-            completer=FuzzyCompleter(BucketBossCompleter(self)),
-            complete_style=CompleteStyle.COLUMN,
-        )
+        self.history = None
+        self.session = None
+        if interactive:
+            history_path = os.path.join(os.path.expanduser("~"), ".bucketboss_history")
+            self.history = FileHistory(history_path)
+            self.session = PromptSession(
+                history=self.history,
+                completer=FuzzyCompleter(BucketBossCompleter(self)),
+                complete_style=CompleteStyle.COLUMN,
+                key_bindings=self._build_key_bindings(),
+            )
         # Commands map to functions that take (app, *args)
         self.commands = {
             'exit': lambda *args: do_exit(self, *args),
@@ -56,7 +61,6 @@ class BucketBossApp:
             'crawlstatus': lambda *args: do_crawl_status(self, *args),
             'get': lambda *args: do_get(self, *args),
             'peek': lambda *args: do_peek(self, *args),
-            'audit': lambda *args: do_audit(self, *args),
             'enum': lambda *args: do_enum(self, *args),
             'enum_report': lambda *args: do_enum_report(self, *args),
             'th': lambda *args: do_th(self, *args),
@@ -105,6 +109,19 @@ class BucketBossApp:
                 print("\nExiting...")
                 break
 
+    def _build_key_bindings(self) -> KeyBindings:
+        """Custom key bindings that keep completion active after Backspace."""
+        kb = KeyBindings()
+
+        @kb.add('backspace')
+        def _backspace_recomplete(event):
+            b = event.app.current_buffer
+            if b.cursor_position > 0:
+                b.delete_before_cursor(1)
+                b.start_completion()
+
+        return kb
+
     def handle_command(self, text):
         """Parse and execute the entered command."""
         try:
@@ -126,14 +143,7 @@ class BucketBossApp:
             return True
 
     def _get_single_char_input(self, prompt_message: str) -> str:
-        """Read a single keypress for pagination prompts.
-
-        ponytail: input() requires Enter but is safe with prompt_toolkit.
-        The previous termios/raw-mode approach (tty.setraw + sys.stdin.read(1))
-        conflicted with prompt_toolkit's vt100 reader: sys.stdin.read(1) is
-        buffered and swallowed typeahead bytes that prompt_toolkit's os.read-based
-        reader couldn't see, leaving the prompt unresponsive after pagination.
-        """
+        """Read pagination input safely without interfering with prompt_toolkit."""
         try:
             line = input(prompt_message)
             return line.strip().lower()[:1] if line.strip() else ' '
@@ -143,8 +153,11 @@ class BucketBossApp:
     def _get_cache_file_path(self):
         """Constructs the path for the cache file."""
         cache_dir = os.path.join(os.path.expanduser("~"), ".bucketboss_cache")
-        os.makedirs(cache_dir, exist_ok=True)
-        bucket_identifier = getattr(self.provider, 'bucket_name', 'default_bucket')
+        os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+        bucket_identifier = safe_filename_component(
+            getattr(self.provider, 'bucket_name', 'default_bucket'),
+            fallback='default_bucket',
+        )
         return os.path.join(cache_dir, f"{bucket_identifier}.cache.json")
 
     def _load_cache(self):
@@ -204,6 +217,10 @@ class BucketBossApp:
 
             with open(cache_file, 'w') as f:
                 json.dump(serializable_cache, f, indent=2)
+            try:
+                os.chmod(cache_file, 0o600)
+            except OSError:
+                pass
             print(f"Saved cache to {cache_file}", file=sys.stderr)
         except Exception as e:
             print(f"Error saving cache to {cache_file}: {e}", file=sys.stderr)

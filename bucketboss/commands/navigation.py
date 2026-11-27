@@ -32,7 +32,7 @@ def do_ls(app, *args):
     # If a file (not ending with slash) is specified, check and show file info
     if path and not path.endswith('/'):
         file_key = app.provider.resolve_path(app.current_prefix, path, is_directory=False)
-        # ponytail: single HEAD instead of listing the whole parent prefix + linear scan.
+        # Single HEAD check avoids listing the entire parent prefix.
         try:
             meta = app.provider.get_object_metadata(file_key)
             f = {
@@ -228,24 +228,13 @@ def do_tree(app, *args):
     all_files, all_dirs, _ = parallel_walk(app, prefix, max_depth=depth, workers=workers)
 
     # Build a dir_contents dict: prefix -> (child_dir_names, child_file_names)
-    # We need to reconstruct the parent→children mapping
     from collections import defaultdict
-    dir_contents = defaultdict(lambda: ([], []))
 
     # Track which directories exist at each prefix
     dir_children = defaultdict(list)   # parent_prefix -> [dir_name, ...]
     file_children = defaultdict(list)  # parent_prefix -> [file_name, ...]
 
     for full_dir, _depth in all_dirs:
-        # full_dir looks like "prefix/subdir/" — parent is everything before the last component
-        parent = full_dir.rstrip('/')
-        if '/' in parent:
-            parent_prefix = parent.rsplit('/', 1)[0] + '/'
-            dir_name = parent.rsplit('/', 1)[1]
-        else:
-            parent_prefix = ''
-            dir_name = parent
-        # Handle case where prefix itself is the parent
         if not full_dir.startswith(prefix):
             continue
         rel = full_dir[len(prefix):]

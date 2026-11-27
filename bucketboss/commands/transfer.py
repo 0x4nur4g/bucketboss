@@ -73,14 +73,23 @@ def do_get(app, *args):
         print("Error: Invalid file path for get.")
         return
 
-    basename = os.path.basename(object_key)
+    from ..parallel import safe_local_path
+
     if local_dest_arg:
         if local_dest_arg.endswith(os.path.sep) or os.path.isdir(local_dest_arg):
-            dest_path = os.path.join(local_dest_arg, basename)
+            try:
+                dest_path = safe_local_path(local_dest_arg, object_key, flat=True)
+            except ValueError as e:
+                print(f"Error: {e}")
+                return
         else:
             dest_path = local_dest_arg
     else:
-        dest_path = os.path.join(os.getcwd(), basename)
+        try:
+            dest_path = safe_local_path(os.getcwd(), object_key, flat=True)
+        except ValueError as e:
+            print(f"Error: {e}")
+            return
 
     try:
         print(f"Downloading {object_key} to {dest_path}...")
@@ -233,13 +242,18 @@ def do_mirror(app, *args):
         prefix = app.provider.resolve_path(app.current_prefix, remote_prefix, is_directory=True)
 
     # Default local dir
+    from ..parallel import (
+        get_workers_from_app,
+        parallel_download,
+        parallel_walk,
+        safe_filename_component,
+    )
+
     if local_dir is None:
-        bucket_name = getattr(app.provider, 'bucket_name', 'bucket')
+        bucket_name = safe_filename_component(getattr(app.provider, 'bucket_name', 'bucket'))
         local_dir = os.path.join('.', 'mirror-' + bucket_name)
         if prefix:
             local_dir = os.path.join(local_dir, prefix.rstrip('/'))
-
-    from ..parallel import parallel_walk, parallel_download, get_workers_from_app
 
     workers = get_workers_from_app(app)
     depth_str = str(depth) if depth is not None else '∞'
@@ -279,8 +293,6 @@ def do_mirror(app, *args):
             size_str = human_readable_size(file_size)
             print("   %-55s %9s" % (full_key, size_str))
 
-        # Remap keys relative to prefix for local paths
-        rel_path = full_key[len(prefix):] if full_key.startswith(prefix) else full_key
         to_download.append((full_key, file_size))
 
     if dry_run:
@@ -299,38 +311,21 @@ def do_mirror(app, *args):
         print()
         return
 
-    # Build file keys with paths relative to prefix for local directory structure
-    # parallel_download uses full keys, so we remap the local_base_dir
-    # to account for the prefix stripping
     def _progress(completed, total, current_file):
         sys.stdout.write("\r   Downloaded: %d / %d  %s" % (completed, total, current_file[-40:] if current_file else ''))
         sys.stdout.flush()
 
-    # We need to strip the prefix from keys for local path structure
-    # Use a temp approach: download with full keys, using a base dir that accounts for prefix
-    # Better: download manually with parallel_download using remapped keys
-    download_keys = []
-    for full_key, file_size in to_download:
-        rel_path = full_key[len(prefix):] if full_key.startswith(prefix) else full_key
-        download_keys.append((full_key, file_size))
-
     downloaded_list, skipped_list, error_list = parallel_download(
-        app, download_keys, local_dir, workers=workers, flat=flat,
-        progress_callback=_progress,
+        app, to_download, local_dir, workers=workers, flat=flat,
+        progress_callback=_progress, strip_prefix=prefix,
     )
 
     # Clear progress line
     sys.stdout.write("\r" + " " * 80 + "\r")
     sys.stdout.flush()
 
-    total_bytes = sum(sz for _, sz in to_download if any(rk == _ for rk, _ in downloaded_list))
-    # Recalculate from what was actually downloaded
-    total_bytes = 0
-    for rk, lp in downloaded_list:
-        for fk, fs in to_download:
-            if fk == rk:
-                total_bytes += fs
-                break
+    size_by_key = dict(to_download)
+    total_bytes = sum(size_by_key.get(rk, 0) for rk, _ in downloaded_list)
 
     # Summary
     print()
@@ -366,8 +361,10 @@ def _resolve_file(app, path, temp_dir):
             raise FileNotFoundError("Local file not found: %s" % expanded)
         return expanded, path
     else:
+        from ..parallel import safe_local_path
+
         key = app.provider.resolve_path(app.current_prefix, path, is_directory=False)
-        local_path = os.path.join(temp_dir, os.path.basename(key) + '.remote')
+        local_path = safe_local_path(temp_dir, key + '.remote', flat=True)
         app.provider.download_file(key, local_path)
         return local_path, key
 

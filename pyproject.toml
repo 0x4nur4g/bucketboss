@@ -4,14 +4,60 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bucketboss"
-version = "0.1.1"
-description = "Interactive Cloud Storage Shell for S3"
-readme = "readme.md"
+version = "0.2.0"
+description = "Interactive cloud storage shell and security recon CLI for AWS S3 and Azure Blob containers"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.8"
+authors = [
+    { name = "0x4nur4g" },
+]
+keywords = [
+    "s3",
+    "aws",
+    "azure",
+    "blob",
+    "cloud-storage",
+    "security",
+    "recon",
+    "cli",
+    "shell",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Utilities",
+]
 dependencies = [
     "boto3",
     "prompt_toolkit",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/0x4nur4g/bucketboss"
+Repository = "https://github.com/0x4nur4g/bucketboss"
+Issues = "https://github.com/0x4nur4g/bucketboss/issues"
+
 [project.scripts]
 bb = "bucketboss:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

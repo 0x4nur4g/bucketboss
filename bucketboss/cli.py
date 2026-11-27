@@ -10,44 +10,77 @@ from botocore.exceptions import ClientError
 
 from .app import BucketBossApp
 from .config import load_config, get_workers
+from .providers.azureblob import AzureBlobProvider, is_azure_blob_url, parse_azure_blob_url
 from .providers.base import CloudProvider
 from .providers.s3 import S3Provider, MultiBucketProvider
 from .providers.s3xml import S3XMLProvider, parse_s3_url
 
+VERSION = "0.2.0"
+
 
 def create_s3_client(args):
+    if getattr(args, 'no_sign_request', False):
+        return boto3.client(
+            's3',
+            config=botocore.client.Config(signature_version=botocore.UNSIGNED),
+        )
     if args.profile:
         session = boto3.Session(profile_name=args.profile)
         return session.client('s3')
     elif args.access_key and args.secret_key:
-        return boto3.client(
-            's3',
-            aws_access_key_id=args.access_key,
-            aws_secret_access_key=args.secret_key,
-        )
+        kwargs = {
+            'aws_access_key_id': args.access_key,
+            'aws_secret_access_key': args.secret_key,
+        }
+        if getattr(args, 'session_token', None):
+            kwargs['aws_session_token'] = args.session_token
+        return boto3.client('s3', **kwargs)
     else:
+        # Use ambient AWS credentials (env vars, default profile, IMDS/SSO) when present,
+        # falling back seamlessly to unsigned requests for anonymous public buckets.
+        session = boto3.Session()
+        if session.get_credentials() is not None:
+            return session.client('s3')
         return boto3.client(
             's3',
             config=botocore.client.Config(signature_version=botocore.UNSIGNED),
         )
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='BucketBoss - Interactive Cloud Storage Shell')
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description=f'BucketBoss v{VERSION} — Interactive Cloud Storage Shell (AWS S3 & Azure Blob)'
+    )
     parser.add_argument('--bucket', required=False, help='S3 bucket name (optional; omit to list all buckets)')
-    parser.add_argument('--url', help='S3 HTTP URL for SDK-free XML access (e.g. https://bucket.s3.us-west-2.amazonaws.com/)')
-    parser.add_argument('--provider', choices=['s3', 's3xml'], default='s3', help='Provider backend (default: s3)')
+    parser.add_argument(
+        '--url',
+        help=(
+            'Direct HTTP/XML target URL — S3 bucket (https://bucket.s3.us-west-2.amazonaws.com/) '
+            'or Azure Blob container (https://account.blob.core.windows.net/container[?sas])'
+        ),
+    )
+    parser.add_argument(
+        '--provider',
+        choices=['s3', 's3xml', 'azure'],
+        default=None,
+        help='Provider backend (auto-detected from --url when omitted; defaults to s3)',
+    )
     parser.add_argument('--config', dest='config_path', default=None, help='Path to config file (default: ~/.bucketboss/config.json)')
+    parser.add_argument('-c', '--command', dest='command', default=None, help='Run a single BucketBoss command non-interactively and exit')
     group = parser.add_argument_group('S3 Authentication methods')
     group.add_argument('--profile', help='AWS CLI profile name for S3')
     group.add_argument('--access-key', help='AWS access key for S3')
-    parser.add_argument('--secret-key', help='AWS secret key for S3')
-    args = parser.parse_args()
+    group.add_argument('--secret-key', help='AWS secret key for S3')
+    group.add_argument('--session-token', help='AWS STS session token for temporary credentials')
+    group.add_argument('--no-sign-request', action='store_true', help='Force unsigned/anonymous S3 requests (ignore ambient AWS credentials)')
+    args = parser.parse_args(argv)
 
     if (args.access_key and not args.secret_key) or (args.secret_key and not args.access_key):
         parser.error('S3 --access-key and --secret-key must be provided together')
-    if sum(1 for x in [args.profile, args.access_key] if x) > 1:
-        parser.error('Only one S3 authentication method (--profile, --access-key) can be used.')
+    if args.session_token and not args.access_key:
+        parser.error('--session-token requires --access-key and --secret-key')
+    if sum(1 for x in [args.profile, args.access_key, args.no_sign_request] if x) > 1:
+        parser.error('Only one S3 authentication mode (--profile, --access-key, --no-sign-request) can be used.')
     return args
 
 
@@ -198,13 +231,10 @@ def probe_permissions(provider):
 
 def _print_banner(provider, perms):
     """Print the startup banner."""
-    bucket_name = getattr(provider, 'bucket_name', 'unknown')
-
-    # Determine transport
-    from .providers.s3xml import S3XMLProvider
-    from .providers.s3 import S3Provider
-    if isinstance(provider, S3XMLProvider):
-        transport = "HTTP/XML (unsigned)"
+    if isinstance(provider, AzureBlobProvider):
+        transport = "Azure Blob HTTP/XML (SAS)" if provider.sas_params else "Azure Blob HTTP/XML (public)"
+    elif isinstance(provider, S3XMLProvider):
+        transport = "S3 HTTP/XML (unsigned)"
     elif isinstance(provider, S3Provider):
         transport = "boto3"
     else:
@@ -215,51 +245,70 @@ def _print_banner(provider, perms):
     stats_icon = '✅' if perms['stats'] else '❌'
 
     print("")
-    print("🪣 BucketBoss v0.1.1")
-    print("   Target:    s3://%s/" % bucket_name)
+    print(f"🪣 BucketBoss v{VERSION}")
+    print("   Target:    %s" % provider.get_prompt_prefix())
     print("   Transport: %s" % transport)
     print("   Access:    %s List  %s Read  %s Stats" % (list_icon, read_icon, stats_icon))
     print("")
 
 
-def main():
-    args = parse_args()
+def _run_provider_session(provider, config, workers, command=None):
+    """Run either a single non-interactive command or the full interactive shell."""
+    if command:
+        app = BucketBossApp(provider, interactive=False)
+        app.config = config
+        app.handle_command(command)
+        return
+
+    perms = probe_permissions(provider)
+    _print_banner(provider, perms)
+
+    app = BucketBossApp(provider, interactive=True)
+    app.config = config
+
+    stats_thread = threading.Thread(
+        target=collect_stats_background,
+        args=(provider, app.stats_result),
+        daemon=True,
+    )
+    stats_thread.start()
+
+    crawl_depth = config.get("general", {}).get("crawl_depth", 2)
+    if crawl_depth > 0:
+        crawl_thread = threading.Thread(
+            target=background_cache_crawl,
+            args=(provider, app.cache, app.crawl_status, crawl_depth, workers),
+            daemon=True,
+        )
+        crawl_thread.start()
+
+    app.run()
+
+
+def _resolve_url_provider(url: str, provider_choice=None) -> CloudProvider:
+    """Create the right HTTP/XML provider for --url."""
+    use_azure = provider_choice == 'azure' or (provider_choice is None and is_azure_blob_url(url))
+    if use_azure:
+        base_url, account_name, container_name, sas_params = parse_azure_blob_url(url)
+        return AzureBlobProvider(base_url, account_name, container_name, sas_params=sas_params)
+    base_url, bucket_name = parse_s3_url(url)
+    return S3XMLProvider(base_url, bucket_name)
+
+
+def main(argv=None):
+    args = parse_args(argv)
     config = load_config(getattr(args, 'config_path', None))
     workers = get_workers(config)
 
-    # Handle --url / --provider s3xml mode (no SDK required)
-    if args.url or args.provider == 's3xml':
+    # Handle --url / HTTP XML providers (S3 XML or Azure Blob container)
+    if args.url or args.provider in ('s3xml', 'azure'):
         if not args.url:
-            print("Error: --url is required when using --provider s3xml", file=sys.stderr)
+            print(f"Error: --url is required when using --provider {args.provider}", file=sys.stderr)
             return
         try:
-            base_url, bucket_name = parse_s3_url(args.url)
-            provider = S3XMLProvider(base_url, bucket_name)
+            provider = _resolve_url_provider(args.url, args.provider)
             provider.head_bucket()
-
-            perms = probe_permissions(provider)
-            _print_banner(provider, perms)
-
-            app = BucketBossApp(provider)
-            app.config = config
-
-            stats_thread = threading.Thread(
-                target=collect_stats_background,
-                args=(provider, app.stats_result),
-                daemon=True,
-            )
-            stats_thread.start()
-
-            crawl_depth = config.get("general", {}).get("crawl_depth", 2)
-            if crawl_depth > 0:
-                crawl_thread = threading.Thread(
-                    target=background_cache_crawl,
-                    args=(provider, app.cache, app.crawl_status, crawl_depth, workers),
-                    daemon=True,
-                )
-                crawl_thread.start()
-
-            app.run()
+            _run_provider_session(provider, config, workers, command=args.command)
         except (PermissionError, FileNotFoundError, ConnectionError) as e:
             print(f"Error: {e}", file=sys.stderr)
         except ValueError as e:
@@ -283,47 +332,29 @@ def main():
             print("Error: Cannot list buckets. Multi-bucket mode requires AWS credentials.")
             print("")
             print("  Options:")
-            print("    bb --profile <profile>              # use an AWS CLI profile")
-            print("    bb --access-key <key> --secret-key <secret>")
+            print("    bb --profile <profile>                            # use an AWS CLI profile")
+            print("    bb --access-key <key> --secret-key <secret>       # explicit AWS credentials")
             print("")
-            print("  For open/public buckets, specify the bucket directly:")
-            print("    bb --bucket <name>                  # via boto3 (unsigned)")
-            print("    bb --url https://bucket.s3.amazonaws.com/  # via HTTP/XML")
+            print("  For open/public targets, specify the bucket or container URL directly:")
+            print("    bb --bucket <name>                                # S3 via boto3 (unsigned)")
+            print("    bb --url https://bucket.s3.amazonaws.com/         # S3 via HTTP/XML")
+            print("    bb --url https://account.blob.core.windows.net/container  # Azure Blob via HTTP/XML")
+            return
+        if args.command:
+            app = BucketBossApp(provider, interactive=False)
+            app.config = config
+            app.handle_command(args.command)
             return
         print("BucketBoss Multi-Bucket Shell. Type 'help' or 'exit'.")
-        app = BucketBossApp(provider)
+        app = BucketBossApp(provider, interactive=True)
         app.config = config
         app.run()
         return
 
-    provider = None
-
     try:
         provider = S3Provider(args.bucket, s3_client)
         provider.head_bucket()
-
-        perms = probe_permissions(provider)
-        _print_banner(provider, perms)
-
-        app = BucketBossApp(provider)
-        app.config = config
-
-        stats_thread = threading.Thread(
-            target=collect_stats_background,
-            args=(provider, app.stats_result),
-            daemon=True,
-        )
-        stats_thread.start()
-
-        crawl_depth = config.get("general", {}).get("crawl_depth", 2)
-        if crawl_depth > 0:
-            crawl_thread = threading.Thread(
-                target=background_cache_crawl,
-                args=(provider, app.cache, app.crawl_status, crawl_depth, workers),
-                daemon=True,
-            )
-            crawl_thread.start()
-
+        _run_provider_session(provider, config, workers, command=args.command)
     except ClientError as e:
         error_code = e.response.get('Error', {}).get('Code', 'Unknown')
         if error_code in ['404', 'NoSuchBucket']:
@@ -336,9 +367,3 @@ def main():
     except Exception as e:
         print(f"Failed to create S3 client or connect: {e}")
         return
-
-    if not provider:
-        print("Error: Could not initialize cloud provider.")
-        return
-
-    app.run()

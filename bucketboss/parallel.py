@@ -1,6 +1,44 @@
 import os
-import sys
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+def safe_filename_component(name: str, fallback: str = 'bucket') -> str:
+    """Sanitize an identifier (such as bucket/container name) for safe use in a single filename."""
+    cleaned = re.sub(r'[^A-Za-z0-9._-]+', '_', (name or '').strip()).strip('._-')
+    return cleaned or fallback
+
+
+def safe_local_path(base_dir: str, relative_key: str, flat: bool = False) -> str:
+    """Resolve a remote object key safely inside base_dir, rejecting path traversal.
+
+    Raises ValueError if the key is empty, contains NUL bytes, drive specifiers,
+    parent traversal ('..'), or resolves outside base_dir.
+    """
+    if not relative_key or '\x00' in relative_key:
+        raise ValueError(f"Unsafe remote key: {relative_key!r}")
+
+    normalized = relative_key.replace('\\', '/')
+    if normalized.startswith('/'):
+        raise ValueError(f"Unsafe absolute remote key: {relative_key!r}")
+
+    raw_parts = [p for p in normalized.split('/') if p and p != '.']
+    if not raw_parts:
+        raise ValueError(f"Unsafe remote key: {relative_key!r}")
+
+    for part in raw_parts:
+        if part == '..' or ':' in part:
+            raise ValueError(f"Unsafe remote key escapes target directory: {relative_key!r}")
+
+    parts = [raw_parts[-1]] if flat else raw_parts
+
+    base_real = os.path.realpath(os.path.abspath(base_dir))
+    target_real = os.path.realpath(os.path.join(base_real, *parts))
+
+    if os.path.commonpath([base_real, target_real]) != base_real or target_real == base_real:
+        raise ValueError(f"Unsafe remote key escapes target directory: {relative_key!r}")
+
+    return target_real
 
 
 def get_workers_from_app(app):
@@ -126,7 +164,7 @@ def _sequential_walk(app, root_prefix, max_depth, progress_callback=None):
 
 
 def parallel_download(app, file_keys, local_base_dir, workers=16, flat=False,
-                      max_size=None, progress_callback=None):
+                      max_size=None, progress_callback=None, strip_prefix=''):
     """Download multiple files in parallel.
 
     Args:
@@ -136,6 +174,7 @@ def parallel_download(app, file_keys, local_base_dir, workers=16, flat=False,
         flat: if True, all files go into local_base_dir directly (no subdirs)
         max_size: skip files larger than this (bytes)
         progress_callback: called with (completed_count, total_count, current_file)
+        strip_prefix: optional remote prefix to strip when mapping to local paths
 
     Returns:
         downloaded: list of (remote_key, local_path) tuples
@@ -161,10 +200,12 @@ def parallel_download(app, file_keys, local_base_dir, workers=16, flat=False,
 
     def _download_one(remote_key, file_size):
         """Download a single file. Returns (remote_key, local_path) or raises."""
-        if flat:
-            local_path = os.path.join(local_base_dir, os.path.basename(remote_key))
-        else:
-            local_path = os.path.join(local_base_dir, remote_key.replace('/', os.sep))
+        rel_key = (
+            remote_key[len(strip_prefix):]
+            if strip_prefix and remote_key.startswith(strip_prefix)
+            else remote_key
+        )
+        local_path = safe_local_path(local_base_dir, rel_key, flat=flat)
 
         local_parent = os.path.dirname(local_path)
         if local_parent:

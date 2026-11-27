@@ -1,5 +1,4 @@
 import collections
-import os
 import sys
 from datetime import datetime
 
@@ -79,11 +78,6 @@ def do_crawl_status(app, *args):
         print(f"Background cache crawl finished with an error: {app.crawl_status.get('error_message', 'Unknown error')}")
     else:
         print(f"Crawl status unknown: {status}")
-
-
-def do_audit(app, *args):
-    """Audit bucket permissions (ACLs, Policy, Public Access)."""
-    print("Audit not yet implemented in provider. (Placeholder)")
 
 
 def do_pwd(app, *args):
@@ -188,6 +182,9 @@ def do_du(app, *args):
         if arg == '--depth' and i + 1 < len(arg_list):
             try:
                 depth = int(arg_list[i + 1])
+                if depth < 1:
+                    print("Depth must be at least 1.")
+                    return
             except ValueError:
                 print("Invalid depth: " + arg_list[i + 1])
                 return
@@ -224,38 +221,39 @@ def do_du(app, *args):
     if root_file_size > 0:
         entries.append(('.', root_file_size))
 
-    # Walk all subdirectories in parallel, then aggregate per top-level child
+    # Walk all subdirectories in parallel, then aggregate up to requested depth
+    total = root_file_size
     if dirs:
         sys.stdout.write("   Scanning...\r")
         sys.stdout.flush()
 
-        # Collect all prefixes to walk in parallel
-        sub_prefixes = [(prefix + d + '/', d) for d in dirs]
-
-        # Walk each subdirectory — use parallel_walk for each
-        # Submit all subdirectory walks at once via parallel_walk on the parent
         all_files, _, _ = parallel_walk(app, prefix, max_depth=50, workers=workers)
 
-        # Aggregate sizes per immediate child directory
         dir_sizes = collections.Counter()
         for full_key, f in all_files:
             rel = full_key[len(prefix):] if full_key.startswith(prefix) else full_key
-            if '/' in rel:
-                top_dir = rel.split('/')[0] + '/'
-                dir_sizes[top_dir] += f.get('size', 0)
-            # Files at root level are already counted in root_file_size
+            if '/' not in rel:
+                continue
+            size = f.get('size', 0)
+            total += size
+            dir_parts = rel.split('/')[:-1]
+            for level in range(1, min(depth, len(dir_parts)) + 1):
+                sub_dir = '/'.join(dir_parts[:level]) + '/'
+                dir_sizes[sub_dir] += size
 
+        # Ensure immediate empty child directories still appear
         for d in dirs:
             dname = d + '/'
-            entries.append((dname, dir_sizes.get(dname, 0)))
+            dir_sizes.setdefault(dname, 0)
+
+        for dname, sz in dir_sizes.items():
+            entries.append((dname, sz))
 
         sys.stdout.write("\r" + " " * 60 + "\r")
         sys.stdout.flush()
 
     # Sort by size descending
     entries.sort(key=lambda x: x[1], reverse=True)
-
-    total = sum(size for _, size in entries)
 
     for name, size in entries:
         print("  %9s  %s" % (human_readable_size(size), name))

@@ -16,14 +16,7 @@ class BucketBossCompleter(Completer):
         self.app = bucket_boss_app
 
     def _get_remote_suggestions(self, prefix_to_list, include_files=False):
-        """Helper to get remote directory and file suggestions for a given prefix.
-
-        ponytail: cache fast-path + 3s timeout. boto3 defaults to 60s read timeout
-        × 5 retries = ~5 minutes on a stalled endpoint; that freezes prompt_toolkit
-        (which can't process backspace/tab/anything while the completer is blocked).
-        Cache hits skip the S3 call entirely; misses cap at 3s so the prompt stays
-        responsive even if the endpoint hangs.
-        """
+        """Return remote directory/file suggestions using cache first, then a bounded 3s fetch."""
         try:
             # Cache stores (dirs, files, timestamp) for prefixes listed with
             # limit=None (populated by the background crawl and by cd/other commands).
@@ -32,8 +25,7 @@ class BucketBossCompleter(Completer):
             if entry and time.time() - entry[2] < 21600:
                 dirs, files = entry[0], entry[1]
             else:
-                # ponytail: bound to one S3 page — Tab completion never needs thousands.
-                # If prefix has more, user types more chars to narrow.
+                # Cap completion fetches to a single page and 3s timeout so slow endpoints never freeze input.
                 with ThreadPoolExecutor(max_workers=1) as ex:
                     future = ex.submit(self.app.list_objects, prefix_to_list, 'name', 500)
                     dirs, files, _ = future.result(timeout=3.0)
@@ -49,7 +41,6 @@ class BucketBossCompleter(Completer):
         try:
             path = os.path.expanduser(text)
             dir_path = os.path.dirname(path)
-            partial = os.path.basename(path)
 
             if not dir_path:
                 dir_path = '.'
@@ -108,11 +99,9 @@ class BucketBossCompleter(Completer):
                     start_pos = 0 if completing_new_word else -len(document.get_word_before_cursor(WORD=True))
 
                     if '/' in remote_path_text:
-                        dir_part, partial = remote_path_text.rsplit('/', 1)
-                        dir_part += '/'
+                        dir_part = remote_path_text.rsplit('/', 1)[0] + '/'
                     else:
                         dir_part = ''
-                        partial = remote_path_text
 
                     resolved_prefix = self.app.provider.resolve_path(
                         self.app.current_prefix, dir_part, is_directory=True
@@ -131,11 +120,9 @@ class BucketBossCompleter(Completer):
                     start_pos = 0 if completing_new_word else -len(document.get_word_before_cursor(WORD=True))
 
                     if '/' in path_to_complete:
-                        dir_part, partial = path_to_complete.rsplit('/', 1)
-                        dir_part += '/'
+                        dir_part = path_to_complete.rsplit('/', 1)[0] + '/'
                     else:
                         dir_part = ''
-                        partial = path_to_complete
 
                     resolved_prefix = self.app.provider.resolve_path(
                         self.app.current_prefix, dir_part, is_directory=True

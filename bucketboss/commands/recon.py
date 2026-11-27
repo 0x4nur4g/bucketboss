@@ -159,6 +159,9 @@ def _format_date(f):
 
 def do_enum(app, *args):
     """Enumerate and classify objects in the bucket."""
+    if args and args[0].lower() == 'report':
+        return do_enum_report(app, *args[1:])
+
     opts = _parse_enum_args(args)
     if opts is None:
         return
@@ -288,15 +291,17 @@ def do_enum(app, *args):
 
     # Auto-download critical files if --download
     if opts['download'] and critical_files:
-        download_dir = "./bb-enum-" + bucket_name
-        os.makedirs(download_dir, exist_ok=True)
+        from ..parallel import safe_filename_component, safe_local_path
+
+        download_dir = "./bb-enum-" + safe_filename_component(bucket_name)
+        os.makedirs(download_dir, mode=0o700, exist_ok=True)
         print("\u2b07\ufe0f  Downloading %d CRITICAL files to %s/..." % (len(critical_files), download_dir))
         for full_key, f, reason in critical_files:
-            local_path = os.path.join(download_dir, full_key.replace('/', os.sep))
-            local_dir = os.path.dirname(local_path)
-            if local_dir:
-                os.makedirs(local_dir, exist_ok=True)
             try:
+                local_path = safe_local_path(download_dir, full_key)
+                local_dir = os.path.dirname(local_path)
+                if local_dir:
+                    os.makedirs(local_dir, exist_ok=True)
                 app.provider.download_file(full_key, local_path)
                 print("   \u2705 " + full_key)
             except Exception as e:
@@ -575,6 +580,8 @@ def do_th(app, *args):
     else:
         file_key = app.provider.resolve_path(app.current_prefix, target, is_directory=False)
 
+    from ..parallel import safe_local_path
+
     temp_dir = tempfile.mkdtemp(prefix='bb-th-')
     local_to_remote = {}  # local_path -> remote_key
 
@@ -592,13 +599,11 @@ def do_th(app, *args):
                 if f.get('size', 0) > opts['max_size']:
                     skipped += 1
                     continue
-                # Preserve directory structure in temp dir
-                rel_path = full_key
-                local_path = os.path.join(temp_dir, rel_path.replace('/', os.sep))
-                local_dir = os.path.dirname(local_path)
-                if local_dir:
-                    os.makedirs(local_dir, exist_ok=True)
                 try:
+                    local_path = safe_local_path(temp_dir, full_key)
+                    local_dir = os.path.dirname(local_path)
+                    if local_dir:
+                        os.makedirs(local_dir, exist_ok=True)
                     app.provider.download_file(full_key, local_path)
                     local_to_remote[local_path] = full_key
                     downloaded += 1
@@ -621,8 +626,8 @@ def do_th(app, *args):
             except Exception:
                 pass  # proceed anyway, download will fail if not readable
 
-            local_path = os.path.join(temp_dir, os.path.basename(file_key))
             try:
+                local_path = safe_local_path(temp_dir, file_key, flat=True)
                 app.provider.download_file(file_key, local_path)
                 local_to_remote[local_path] = file_key
                 print("🔍 Scanning: %s" % file_key)
@@ -655,6 +660,11 @@ def do_th(app, *args):
                 findings.append(finding)
             except json.JSONDecodeError:
                 continue
+
+        if result.returncode != 0 and not findings:
+            err_msg = (result.stderr or '').strip() or f"exit status {result.returncode}"
+            print("❌ TruffleHog failed: %s" % err_msg)
+            return
 
         if opts['verified_only']:
             findings = [f for f in findings if f.get('Verified')]

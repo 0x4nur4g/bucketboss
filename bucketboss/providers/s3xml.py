@@ -8,9 +8,9 @@ import urllib.error
 import xml.etree.ElementTree as ET
 
 from .base import CloudProvider
+from ._http import DEFAULT_TIMEOUT, read_bounded, safe_urlopen
 
 S3_NS = 'http://s3.amazonaws.com/doc/2006-03-01/'
-DEFAULT_TIMEOUT = 30
 
 
 def parse_s3_url(url: str) -> Tuple[str, str]:
@@ -24,13 +24,17 @@ def parse_s3_url(url: str) -> Tuple[str, str]:
       - https://custom-host:9000/BUCKET/           (S3-compatible endpoint)
     """
     parsed = urlparse(url)
+    scheme = (parsed.scheme or '').lower()
+    if scheme not in ('http', 'https'):
+        raise ValueError(f"Unsupported URL scheme '{parsed.scheme}': only http and https are allowed")
     host = parsed.hostname or ''
+    if not host:
+        raise ValueError(f"Missing hostname in URL: {url}")
     path_parts = [p for p in parsed.path.split('/') if p]
 
     # Virtual-hosted style: BUCKET.s3.amazonaws.com or BUCKET.s3.REGION.amazonaws.com
     if host.endswith('.amazonaws.com'):
         labels = host.split('.')
-        scheme = parsed.scheme or 'https'
 
         # Check for virtual-hosted with region: BUCKET.s3.REGION.amazonaws.com
         # labels = ['mybucket', 's3', 'us-west-2', 'amazonaws', 'com']
@@ -68,7 +72,6 @@ def parse_s3_url(url: str) -> Tuple[str, str]:
     if not path_parts:
         raise ValueError(f"Cannot determine bucket from URL: {url}")
     bucket_name = path_parts[0]
-    scheme = parsed.scheme or 'https'
     port_str = f":{parsed.port}" if parsed.port else ''
     base_url = f"{scheme}://{host}{port_str}/{bucket_name}"
     return base_url, bucket_name
@@ -89,7 +92,8 @@ class S3XMLProvider(CloudProvider):
         url = f"{self.base_url}?max-keys=0"
         try:
             req = urllib.request.Request(url, method='GET')
-            urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT)
+            with safe_urlopen(req, timeout=DEFAULT_TIMEOUT):
+                pass
         except urllib.error.HTTPError as e:
             if e.code == 403:
                 raise PermissionError(f"Access denied to bucket '{self.bucket_name}'")
@@ -184,8 +188,8 @@ class S3XMLProvider(CloudProvider):
 
         url = f"{self.base_url}?{urlencode(params)}"
         req = urllib.request.Request(url, method='GET')
-        with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
-            body = resp.read()
+        with safe_urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+            body = read_bounded(resp)
         return self._parse_list_response(body, prefix, v2=True)
 
     def _list_objects_v1(
@@ -202,8 +206,8 @@ class S3XMLProvider(CloudProvider):
 
         url = f"{self.base_url}?{urlencode(params)}"
         req = urllib.request.Request(url, method='GET')
-        with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
-            body = resp.read()
+        with safe_urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+            body = read_bounded(resp)
         return self._parse_list_response(body, prefix, v2=False)
 
     def _parse_list_response(
@@ -317,7 +321,7 @@ class S3XMLProvider(CloudProvider):
         url = f"{self.base_url}/{quote(key, safe='/')}"
         try:
             req = urllib.request.Request(url, method='GET')
-            with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+            with safe_urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
                 return resp.read()
         except urllib.error.HTTPError as e:
             self._handle_http_error(e, f"getting object '{key}'")
@@ -330,7 +334,7 @@ class S3XMLProvider(CloudProvider):
         url = f"{self.base_url}/{quote(key, safe='/')}"
         try:
             req = urllib.request.Request(url, method='GET')
-            with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+            with safe_urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
                 with open(local_path, 'wb') as f:
                     while True:
                         chunk = resp.read(8192)
@@ -354,7 +358,7 @@ class S3XMLProvider(CloudProvider):
         try:
             req = urllib.request.Request(url, method='GET')
             req.add_header('Range', f'bytes=0-{size - 1}')
-            with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+            with safe_urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
                 return resp.read()
         except urllib.error.HTTPError as e:
             self._handle_http_error(e, f"reading range of '{key}'")
@@ -367,7 +371,7 @@ class S3XMLProvider(CloudProvider):
         url = f"{self.base_url}/{quote(key, safe='/')}"
         try:
             req = urllib.request.Request(url, method='HEAD')
-            with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+            with safe_urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
                 headers = resp.headers
 
             size = int(headers.get('Content-Length', 0))

@@ -55,13 +55,14 @@ COMMAND_HELP = {
 
     'enum': """enum [path] [--depth N] [--download] [--min-severity LEVEL] [--no-classify]
   Enumerate and classify files by security relevance.
+  enum report [--format text|json|md]   Print full report from last enum run
   --depth N              Max crawl depth (default: 5)
   --download             Auto-download CRITICAL files
   --min-severity LEVEL   Filter: critical|high|medium|info (default: info)
   --no-classify          Raw listing without classification""",
 
     'enum_report': """enum_report [--format text|json|md]
-  Output the full results from the last enum run.
+  Output the full results from the last enum run (alias: enum report).
   --format FMT    Output format: text (default), json, or md""",
 
     'scope': """scope [path]
@@ -77,14 +78,14 @@ COMMAND_HELP = {
   --keep          Keep downloaded temp files after scan
   --max-size N    Skip files larger than N bytes (default: 50MB)""",
 
-    'tag': """tag <file> <tag_text>
+    'tag': """tag <file> <note_text> [--severity critical|high|medium|info]
   Tag a file with a finding/note for later review.""",
 
-    'findings': """findings [--severity LEVEL]
-  List all tagged findings from the current session.""",
+    'findings': """findings [--severity LEVEL] [--source enum|th|tag] [--json]
+  List all accumulated findings from enum, TruffleHog, and manual tags.""",
 
-    'export': """export [--format text|json|md] [--output FILE]
-  Export all findings to a file or stdout.""",
+    'export': """export [--format text|json|md] [--output FILE|-]
+  Export all findings to a report file (or '-' for stdout).""",
 
     'find': """find <pattern> [--path prefix] [--depth N]
   Find objects by name pattern (glob matching on filename).

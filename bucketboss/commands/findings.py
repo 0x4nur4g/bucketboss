@@ -213,11 +213,14 @@ def do_findings(app, *args):
 
 def do_export(app, *args):
     """Generate assessment report."""
+    from ..parallel import safe_filename_component
+
     _ensure_findings(app)
 
     # Parse arguments
     arg_list = list(args)
     fmt = 'md'
+    output_path = None
 
     i = 0
     while i < len(arg_list):
@@ -229,8 +232,11 @@ def do_export(app, *args):
                 return
             fmt = val
             i += 2
+        elif arg in ('--output', '-o') and i + 1 < len(arg_list):
+            output_path = arg_list[i + 1]
+            i += 2
         elif arg == '--help':
-            print("Usage: export [--format text|json|md]")
+            print("Usage: export [--format text|json|md] [--output FILE|-]")
             return
         else:
             print("Unknown option: %s" % arg)
@@ -242,7 +248,6 @@ def do_export(app, *args):
 
     ext_map = {'md': 'md', 'json': 'json', 'text': 'txt'}
     ext = ext_map[fmt]
-    filename = 'bb-report-%s-%s.%s' % (bucket_name, date_str, ext)
 
     if fmt == 'json':
         content = _export_json(app, findings, bucket_name, date_str)
@@ -251,8 +256,22 @@ def do_export(app, *args):
     else:
         content = _export_text(app, findings, bucket_name, date_str)
 
+    if output_path == '-':
+        print(content)
+        return
+
+    filename = output_path or (
+        'bb-report-%s-%s.%s' % (safe_filename_component(bucket_name, fallback='unknown'), date_str, ext)
+    )
+    parent = os.path.dirname(filename)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(filename, 'w') as f:
         f.write(content)
+    try:
+        os.chmod(filename, 0o600)
+    except OSError:
+        pass
 
     # Summary stats
     severity_counts = {}
